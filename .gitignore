@@ -1,0 +1,23 @@
+# Ignore build files
+webserver
+
+# Ignore log files
+server.log
+
+# Ignore configuration files
+config/server_config.txt
+
+# Ignore compiled object files
+*.o
+
+# Ignore backup files
+*.bak
+*.tmp
+
+# Ignore IDE-specific files
+.vscode/
+*.swp
+*.swo
+
+# Ignore include directory for libraries (if applicable)
+include/
