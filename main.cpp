@@ -11,6 +11,9 @@
 #include <unistd.h>
 #include <ctime>
 #include "include/nlohmann/json.hpp"
+#include <chrono>
+#include <thread>
+#include <arpa/inet.h>
 
 using json = nlohmann::json;
 
@@ -28,6 +31,7 @@ int PORT = 8080;
 std::string ROOT = "public";
 
 std::unordered_map<std::string, std::string> fileCache;
+
 
 void loadConfig() {
     std::ifstream configFile("config/server_config.txt");
@@ -59,25 +63,56 @@ void logRequest(const std::string& request) {
     }
 }
 
-std::unordered_map<std::string, std::string> parseQueryParams(const std::string& url) {
-    std::unordered_map<std::string, std::string> params;
-    size_t pos = url.find('?');
-    if (pos != std::string::npos) {
-        std::string queryString = url.substr(pos + 1);
-        std::istringstream queryStream(queryString);
-        std::string param;
+struct RequestInfo {
+    int count;
+    std::chrono::steady_clock::time_point firstRequestTime;
+};
+std::unordered_map<std::string, RequestInfo> requestCounts; 
+const int REQUEST_LIMIT = 5; 
+const int TIME_FRAME_SECONDS = 10; 
 
-        while (std::getline(queryStream, param, '&')) {
-            size_t equalsPos = param.find('=');
-            if (equalsPos != std::string::npos) {
-                std::string key = param.substr(0, equalsPos);
-                std::string value = param.substr(equalsPos + 1);
-                params[key] = value;
-            }
+bool isRateLimited(const std::string& clientIP) {
+    auto now = std::chrono::steady_clock::now();
+    
+    if (requestCounts.find(clientIP) == requestCounts.end()) {
+        requestCounts[clientIP] = {1, now};
+        return false;
+    }
+
+    auto& info = requestCounts[clientIP];
+    
+    if (std::chrono::duration_cast<std::chrono::seconds>(now - info.firstRequestTime).count() >= TIME_FRAME_SECONDS) {
+        info.count = 1;
+        info.firstRequestTime = now;
+        return false;
+    }
+
+    if (info.count < REQUEST_LIMIT) {
+        info.count++;
+        return false;
+    }
+
+    return true;
+}
+
+std::unordered_map<std::string, std::string> parseQueryParams(const std::string& body) {
+    std::unordered_map<std::string, std::string> params;
+    std::istringstream queryStream(body);
+    std::string param;
+
+    while (std::getline(queryStream, param, '&')) {
+        size_t equalsPos = param.find('=');
+        if (equalsPos != std::string::npos) {
+            std::string key = param.substr(0, equalsPos);
+            std::string value = param.substr(equalsPos + 1);
+            params[key] = value;
         }
     }
     return params;
 }
+
+
+
 
 std::string readFile(const std::string& path) {
     if (fileCache.count(path)) {
@@ -94,6 +129,53 @@ std::string readFile(const std::string& path) {
     std::string content = ss.str();
     fileCache[path] = content; 
     return content;
+}
+
+void handleLoginRequest(int clientSocket) {
+    std::string response = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n"
+                           "<form method='POST' action='/authenticate'>"
+                           "<input type='text' name='username' placeholder='Username' required>"
+                           "<input type='password' name='password' placeholder='Password' required>"
+                           "<input type='submit' value='Login'>"
+                           "</form>";
+    send(clientSocket, response.c_str(), response.size(), 0);
+}
+
+void handleAuthenticateRequest(int clientSocket, const std::string& requestBody) {
+    auto params = parseQueryParams(requestBody);
+    std::string username = params["username"];
+    std::string password = params["password"];
+
+    std::cout << "Received username: " << username << ", password: " << password << std::endl; // Debug line
+
+    if (username == "user" && password == "pass") {
+        std::string response = "HTTP/1.1 200 OK\r\nSet-Cookie: session_id=12345; HttpOnly\r\n\r\n"
+                               "<h1>Welcome, " + username + "!</h1>";
+        send(clientSocket, response.c_str(), response.size(), 0);
+    } else {
+        std::string response = "HTTP/1.1 401 Unauthorized\r\n\r\n"
+                               "<h1>Unauthorized</h1>";
+        send(clientSocket, response.c_str(), response.size(), 0);
+    }
+}
+
+void handleUploadRequest(int clientSocket, const std::string& request) {
+    std::string boundary = "--boundary"; 
+    size_t pos = request.find(boundary);
+
+    if (pos == std::string::npos) {
+        std::string response = "HTTP/1.1 400 Bad Request\r\n\r\n";
+        send(clientSocket, response.c_str(), response.size(), 0);
+        return;
+    }
+
+    std::string fileData = request.substr(pos + boundary.length());
+    std::ofstream outFile("uploaded_file.txt");
+    outFile << fileData; 
+    outFile.close();
+
+    std::string response = "HTTP/1.1 200 OK\r\n\r\nFile uploaded successfully.";
+    send(clientSocket, response.c_str(), response.size(), 0);
 }
 
 void handleGetRequest(int clientSocket, const std::string& path) {
@@ -143,17 +225,47 @@ void handlePostRequest(int clientSocket, const std::string& request) {
 void handleRequest(int clientSocket) {
     char buffer[1024];
     read(clientSocket, buffer, sizeof(buffer));
-    
+
     std::string request(buffer);
-    logRequest(request); 
+    logRequest(request);
+
+    struct sockaddr_in clientAddr;
+    socklen_t clientLen = sizeof(clientAddr);
+    getpeername(clientSocket, (struct sockaddr*)&clientAddr, &clientLen);
+    std::string clientIP = inet_ntoa(clientAddr.sin_addr);
+
+    if (isRateLimited(clientIP)) {
+        std::string response = "HTTP/1.1 429 Too Many Requests\r\n\r\n";
+        send(clientSocket, response.c_str(), response.size(), 0);
+        close(clientSocket);
+        return;
+    }
+
     std::string method = request.substr(0, request.find(' '));
     std::string path = request.substr(request.find(' ') + 1);
-    path = path.substr(0, path.find(' ')); 
+    path = path.substr(0, path.find(' '));
+
+    std::string body;
+    if (method == "POST") {
+        size_t pos = request.find("\r\n\r\n");
+        if (pos != std::string::npos) {
+            body = request.substr(pos + 4); 
+    }
 
     if (method == "GET") {
-        handleGetRequest(clientSocket, path);
+        if (path == "/login") {
+            handleLoginRequest(clientSocket);
+        } else {
+            handleGetRequest(clientSocket, path);
+        }
     } else if (method == "POST") {
-        handlePostRequest(clientSocket, request);
+        if (path == "/upload") {
+            handleUploadRequest(clientSocket, body);
+        } else if (path == "/authenticate") {
+            handleAuthenticateRequest(clientSocket, body); 
+        } else {
+            handlePostRequest(clientSocket, body);
+        }
     } else {
         std::string response = "HTTP/1.1 405 Method Not Allowed\r\n\r\n";
         send(clientSocket, response.c_str(), response.size(), 0);
@@ -161,6 +273,8 @@ void handleRequest(int clientSocket) {
 
     close(clientSocket);
 }
+}
+
 
 int main() {
     loadConfig(); 
