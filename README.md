@@ -21,9 +21,18 @@ A lightweight web server built in C++ that supports basic HTTP functionalities s
    ```bash
    git clone git@github.com:Arussel1/HTTPServer.git
    cd HTTPServer
-2. Compile the server:
+2. Create the configuration file:
     ```bash
-    g++ main.cpp -o webserver -I./include
+    mkdir config
+    echo "PORT=8080" >> config/server_config.txt
+    echo "ROOT=public" >> config/server_config.txt
+    ```
+3. Compile the server:
+    ```bash
+    mkdir build
+    cd build
+    cmake ..
+    make
     ```
 3. Run the server:
     ```bash
