@@ -111,8 +111,16 @@ std::unordered_map<std::string, std::string> parseQueryParams(const std::string&
     return params;
 }
 
-
-
+std::string getBoundary(const std::string& request) {
+    std::string boundary;
+    size_t pos = request.find("boundary=");
+    if (pos != std::string::npos) {
+        size_t start = pos + 9; 
+        size_t end = request.find("\r\n", start);
+        boundary = request.substr(start, end - start);
+    }
+    return boundary;
+}
 
 std::string readFile(const std::string& path) {
     if (fileCache.count(path)) {
@@ -130,6 +138,7 @@ std::string readFile(const std::string& path) {
     fileCache[path] = content; 
     return content;
 }
+
 
 void handleLoginRequest(int clientSocket) {
     std::string response = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n"
@@ -160,18 +169,36 @@ void handleAuthenticateRequest(int clientSocket, const std::string& requestBody)
 }
 
 void handleUploadRequest(int clientSocket, const std::string& request) {
-    std::string boundary = "--boundary"; 
-    size_t pos = request.find(boundary);
-
-    if (pos == std::string::npos) {
+    std::string boundary = getBoundary(request);
+    std::string fileContent;
+    
+    size_t boundaryStart = request.find(boundary);
+    if (boundaryStart == std::string::npos) {
         std::string response = "HTTP/1.1 400 Bad Request\r\n\r\n";
         send(clientSocket, response.c_str(), response.size(), 0);
         return;
     }
 
-    std::string fileData = request.substr(pos + boundary.length());
+    size_t contentStart = request.find("\r\n\r\n", boundaryStart);
+    if (contentStart == std::string::npos) {
+        std::string response = "HTTP/1.1 400 Bad Request\r\n\r\n";
+        send(clientSocket, response.c_str(), response.size(), 0);
+        return;
+    }
+    
+    contentStart += 4; 
+
+    size_t contentEnd = request.find(boundary, contentStart);
+    if (contentEnd == std::string::npos) {
+        std::string response = "HTTP/1.1 400 Bad Request\r\n\r\n";
+        send(clientSocket, response.c_str(), response.size(), 0);
+        return;
+    }
+    
+    fileContent = request.substr(contentStart, contentEnd - contentStart);
+    
     std::ofstream outFile("uploaded_file.txt");
-    outFile << fileData; 
+    outFile << fileContent; 
     outFile.close();
 
     std::string response = "HTTP/1.1 200 OK\r\n\r\nFile uploaded successfully.";
